@@ -28,3 +28,14 @@ The repository is organised in the following manner:
                 ├── 00_Ranalisys.R
                 └── 01_Ranalisys_allsamples.Rmd
 ```
+
+# RNAseq
+- Here you have the code and sample sheed to replicate the sample analysis and postanalysis of our RNAseq samples.
+- Inside the subfolder *postanalysis* you have the script to replicate figures.
+
+# scRNAseq
+- Here you have the code and sample sheed to replicate the sample analysis and postanalysis of the scRNAseq used in the paper. 
+- Public datasets analysis are under *BC and BLC* and inside their corresponding subfolders.
+
+# Spatial
+- Here you have the code for public dpatial data analysis and figures.
