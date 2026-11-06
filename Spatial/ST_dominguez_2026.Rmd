@@ -1,0 +1,1351 @@
+
+---
+title: "SILVIA HSP90 ST-TNBC-wang"
+author: "Sofía Zdral"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir =  
+"/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG")
+```
+
+This code was used to generate _Figure 7C and Supplementary Figure 13H_
+
+Data for spatial transcriptomics on triple negative breast cancers from Wang et al. 2024 is available on: https://zenodo.org/records/14204217
+
+Download the data contained in the following folders. According to the authors:
+In _byArray_ folder we will find the data by array/subarray. Mapping  
+between those arrays and samples is in ids.RDS (Clinical directory).  
+In each directory, there are the following files:
+   -A *Cy3 jpg* file giving the location of the spots
+   -An *HE jpg* file which is the H&E image
+   -For both image, there can be a *.rot* version if it was necessary to rotate them for the analysis.
+   -*spot_data...* give the localization of all or selected spots
+   -*small.jpg* is a subsampled version of the image.
+   - *selection.RData* counts of selected spots
+   -*all.RData* counts of all spots
+   -*allSpots.RData* position of all spots
+   -*annotBySpot.RDS* if available, the annotation (in pixel) for each spot
+   -*artefacts.RDS* if present, gives the number of pixels annotated  as an artefact in each spot
+
+After dowload the data in your working directory, load the libraries required:
+```{r}
+library(ggplot2)
+library(dplyr)
+library(viridis)
+library(biomaRt)
+library(grid)
+library(jpeg)
+library(png)
+library(tidyr)
+```
+
+Change the ENS name of each gene to GENE ID usign BioMart. This script will modify the name of each slide(sample) and create a new file called 'cnts_symbols'. ¡Only run this chunk for the first time!
+```{r}
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+base_path <- "/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG/byArray/"
+#
+Folders for each sample CN (CN1, CN2, ...)
+cn_folders <- list.dirs(base_path, full.names = TRUE, recursive = FALSE)
+#
+# Loop through each folder CN
+for (cn in cn_folders) {
+  # List each subfolder starting with C, D o E
+  subfolders <- list.dirs(cn, full.names = TRUE, recursive = FALSE)
+  subfolders <- subfolders[grepl("/[CDE][0-9]+$", subfolders)]
+
+  for (sub in subfolders) {
+    message("Processing folder: ", sub)
+
+    cnts_file <- file.path(sub, "selection.RData")
+    if (!file.exists(cnts_file)) {
+      warning("File not found: ", cnts_file)
+      next
+    }
+
+    # Load cnts
+    load(cnts_file)
+
+    # Verify if cnts exists
+    if (!exists("cnts")) {
+      warning("Object 'cnts' not defined: ", cnts_file)
+      next
+    }
+
+    # Extract and clean IDs Ensembl
+    ensembl_ids <- colnames(cnts)
+    ensembl_ids_clean <- sub("\\..*", "", ensembl_ids)
+
+    # Obtain mapping Ensembl → symbol
+    mapping <- getBM(
+      attributes = c("ensembl_gene_id", "hgnc_symbol"),
+      filters = "ensembl_gene_id",
+      values = ensembl_ids_clean,
+       mart = ensembl
+    )
+
+    # Create dictionary 
+    dict <- setNames(mapping$hgnc_symbol, mapping$ensembl_gene_id)
+
+    # Generate a new matrix after renaming the genes
+    cnts_symbols <- cnts
+    colnames(cnts_symbols) <- ifelse(dict[ensembl_ids_clean] == "" |  is.na(dict[ensembl_ids_clean]),
+                                     ensembl_ids,
+                                      dict[ensembl_ids_clean])
+
+    # Save results
+    save(cnts_symbols, file = file.path(sub, "cnts_symbols.RData"))
+  }
+}
+
+# Note: No data files are available for sample CN35/D2; only the H&E slide is available
+```
+
+Get the *H&E* image for each patient in an unique pdf file 
+```{r} 
+base_path <- "/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG/byArray"
+
+cn_folders <- list.dirs(base_path, full.names = TRUE, recursive = FALSE) 
+
+pdf(file.path(base_path, "HE_images_all_samples.pdf"), width = 8, height = 8)
+  for (cn in cn_folders) {
+    subfolders <- list.dirs(cn, full.names = TRUE, recursive = FALSE)
+   subfolders <- subfolders[grepl("/[CDE][0-9]+$", subfolders)]
+
+   for (sub in subfolders) {#
+     # Search files with "HE" in its name
+     he_files <- list.files(sub, pattern = "^small\\.jpg$",  full.names = TRUE)
+
+     if (length(he_files) == 0) {
+       warning("No HE image found in: ", sub)
+      next
+     }
+     for (f in he_files) {
+       grid::grid.newpage()
+       img <- jpeg::readJPEG(f)
+       grid::grid.raster(img)
+       title <- paste("Sample:", basename(dirname(sub)), "/", basename(sub), "\nArchivo:", basename(f))
+       grid::grid.text(title, x = 0.5, y = 0.95, gp = gpar(fontsize =12, col = "blue"))
+     }
+  }
+ }
+
+dev.off()
+```
+
+Get the *annotation* image for each slide in an unique pdf file with the legend for each cell type. This is what we use as reference for cellular composition (annotation) of each ST slide.
+```{r}
+img_dir <-  "/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG/Images/imageAnnotations"
+
+#List all PNG
+img_files <- list.files(
+   img_dir,
+   pattern = "\\.png$",
+   full.names = TRUE,
+   ignore.case = TRUE
+)
+
+img_files <- sort(img_files)
+
+#Cell type legend
+colAnn2 <- c(
+   "Nothing" = "#FFFFFF",
+   "Tumor" = "#017801",
+   "Necrosis" = "#000000",
+   "Fat tissue" = "#000080",
+   "Low TIL stroma" = "#ff904f",
+   "Vessels" = "#dc0000",
+   "Artefacts" = "#6e2400",
+   "Lactiferous duct" = "#9980e6",
+   "High TIL stroma" = "#e9e900",
+   "in situ" = "#ccffcc",
+   "Lymphoid nodule" = "#80801a",
+   "Hole (whitespace)" = "#40e5f6",
+   "Lymphocyte" = "#c4417f",
+   "Stroma cell" = "#ff9980",
+   "Nerve" = "#4d8080",
+   "Heterologous elements" = "#808080",
+   "Acellular stroma" = "#e9d1bb",
+   "Tumor region" = "#258a15"
+)
+
+pdf_file <- file.path(
+   img_dir,
+   "Annotation_images_with_legend.pdf"
+)
+
+pdf(
+   pdf_file,
+   width = 11.69,   # A4 horizontal
+   height = 8.27,
+   onefile = TRUE
+)
+for (img_file in img_files) {
+
+   sample_name <- tools::file_path_sans_ext(
+     basename(img_file)
+   )
+
+   img <- readPNG(img_file)
+
+   img_width <- dim(img)[2]
+   img_height <- dim(img)[1]
+
+   aspect_ratio <- img_width / img_height
+   grid.newpage()
+
+   grid.text(
+     sample_name,
+     x = 0.5,
+     y = 0.975,
+     gp = gpar(
+       fontsize = 14,
+       fontface = "bold"
+     )
+   )
+
+   pushViewport(
+     viewport(
+       x = 0.5,
+       y = 0.60,
+       width = 0.94,
+       height = 0.68
+     )
+   )
+
+# Keep original proportions
+   grid.raster(
+     img,
+     interpolate = FALSE,
+     just = "center"
+   )
+
+   popViewport()
+
+# Legend for each image
+   n_colors <- length(colAnn2)
+   n_col <- 2
+   n_row <- ceiling(n_colors / n_col)
+   x_positions <- c(0.30, 0.70)
+   legend_y_top <- 0.24
+   legend_y_bottom <- 0.035
+
+   y_positions <- seq(
+     legend_y_top,
+     legend_y_bottom,
+     length.out = n_row
+   )
+   grid.text(
+     "Annotation",
+     x = 0.5,
+     y = 0.285,
+     gp = gpar(
+       fontsize = 11,
+       fontface = "bold"
+     )
+   )
+
+   for (i in seq_along(colAnn2)) {
+
+     col_idx <- ifelse(i <= n_row, 1, 2)
+
+     row_idx <- ifelse(
+       i <= n_row,
+       i,
+       i - n_row
+     )
+
+     x <- x_positions[col_idx]
+     y <- y_positions[row_idx]
+
+     grid.rect(
+       x = x,
+       y = y,
+       width = 0.025,
+       height = 0.025,
+       gp = gpar(
+         fill = colAnn2[i],
+         col = "grey30",
+         lwd = 0.5
+       )
+     )
+
+          grid.text(
+       names(colAnn2)[i],
+       x = x + 0.02,
+       y = y,
+       just = "left",
+       gp = gpar(
+         fontsize = 8.5
+       )
+     )
+   }
+}
+
+dev.off()
+```
+
+Get the *fraction for main cell types* (tumor, stroma, lymphoid, artifact). Only use samples with "annotBySpot.RDS" 
+```{r}
+base_path <- "/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG/byArray"
+results_dir <- "/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG/results"
+
+dir.create(
+   results_dir,
+   recursive = TRUE,
+   showWarnings = FALSE
+)
+
+# Define new groups:
+annotation_groups <- list(
+
+   "Artifact" = c("Artefacts","Hole (whitespace)","in situ","Necrosis","Nothing","Heterologous elements"),
+
+   "Stroma" = c("Acellular stroma","Fat tissue","High TIL  
+stroma","Lactiferous duct","Low TIL stroma","Stroma  
+cell","Vessels","Nerve"),
+
+   "Lymphoid" = c("Lymphocyte", "Lymphoid nodule"),
+
+   "Tumor" = c("Tumor","Tumor region")
+)
+
+
+cn_folders <- list.dirs(base_path,full.names = TRUE,recursive = FALSE)
+
+sample_folders <- unlist(
+   lapply(
+     cn_folders,
+
+     function(cn) {
+
+       subfolders <- list.dirs(
+         cn,
+         full.names = TRUE,
+         recursive = FALSE
+       )
+
+       subfolders <- subfolders[
+         grepl(
+           "/[CDE][0-9]+$",
+           subfolders
+         )
+       ]
+       subfolders <- subfolders[
+         file.exists(
+           file.path(
+             subfolders,
+             "annotBySpot.RDS"  #Select samples only with annotBySpot.RDS
+           )
+         )
+       ]
+
+       return(subfolders)
+     }
+   )
+)
+
+
+if (length(sample_folders) == 0) {
+
+   stop(
+     "No samples with annotBySpot.RDS found."
+   )
+}
+
+all_fractions <- list()
+
+for (sub in sample_folders) {
+   sample_id <- paste(
+     basename(dirname(sub)),
+     basename(sub),
+     sep = "/"
+   )
+
+   annot_file <- file.path(
+     sub,
+     "annotBySpot.RDS" #Nº of pixel for each annotation
+   )
+
+   annotBySpot <- readRDS(annot_file)
+   annotBySpot <- as.data.frame(annotBySpot)
+   available_annotations <- colnames(annotBySpot)
+
+   grouped_counts <- matrix(
+     0,
+     nrow = nrow(annotBySpot),
+     ncol = length(annotation_groups)
+   )
+
+   colnames(grouped_counts) <- names(annotation_groups)
+   rownames(grouped_counts) <- rownames(annotBySpot)
+
+  # Compute the sum of the annotations associated with each group
+   for (group_name in names(annotation_groups)) {
+
+     annotations <- annotation_groups[[group_name]]
+     annotations_present <- intersect(
+       annotations,
+       available_annotations
+     )
+
+     if (length(annotations_present) > 0) {
+
+       grouped_counts[, group_name] <-
+         rowSums(
+           annotBySpot[, annotations_present, drop = FALSE],
+           na.rm = TRUE
+         )
+     }
+   }
+
+# Save the annotations grouped
+   annotBySpot_grouped <- as.data.frame(grouped_counts, check.names = FALSE)
+
+# Get total pixels per spot
+   total_pixels <- rowSums(
+     annotBySpot_grouped,
+     na.rm = TRUE
+   )
+
+# Get fraction 0-1
+   fractions <- annotBySpot_grouped
+   fractions[,] <- NA_real_
+
+   valid_spots <- total_pixels > 0
+
+   fractions[valid_spots, ] <-
+     annotBySpot_grouped[valid_spots, ] /
+     total_pixels[valid_spots]
+
+   fractions <- data.frame(
+     sample_id = sample_id,
+     spot = rownames(fractions),
+     fractions,
+     total_pixels = total_pixels,
+     row.names = NULL,
+     check.names = FALSE
+   )
+
+# Save results
+   sample_dir <- file.path(results_dir,gsub("/", "_", sample_id))
+   dir.create(sample_dir,recursive = TRUE, showWarnings = FALSE)
+
+   saveRDS( annotBySpot_grouped,  
+file.path(sample_dir,"annotBySpot_grouped.RDS"))
+
+   saveRDS(fractions,file.path(sample_dir,"annotFractionsBySpot.RDS"))
+
+# Create a CSV file
+write.csv(fractions,file.path(sample_dir,"annotFractionsBySpot.csv"),  
+row.names = FALSE)
+
+   all_fractions[[sample_id]] <- fractions
+}
+
+
+fractions_all <- do.call(rbind,all_fractions)
+rownames(fractions_all) <- NULL
+
+saveRDS(fractions_all,  
+file.path(results_dir,"annotFractionsBySpot_ALL_SAMPLES.RDS"))
+
+write.csv(fractions_all,  
+file.path(results_dir,"annotFractionsBySpot_ALL_SAMPLES.csv"),row.names =  
+FALSE)
+```
+
+*Represent each cellular fraction* in each patient slide using a colorimetric scale
+```{r}
+base_path <- "/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG/byArray"
+results_dir <- "/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG/results"
+
+output_pdf <- file.path(results_dir,"Tumor_fraction_all_samples.pdf") #Change name for cellular fraction of interest
+
+cn_folders <- list.dirs(base_path,full.names = TRUE,recursive = FALSE)
+
+sample_folders <- unlist(lapply(cn_folders,
+
+     function(cn) {
+
+       subfolders <- list.dirs(
+         cn,
+         full.names = TRUE,
+         recursive = FALSE
+       )
+
+       subfolders <- subfolders[
+         grepl(
+           "/[CDE][0-9]+$",
+           subfolders
+         )
+       ]
+
+             subfolders <- subfolders[
+         file.exists(
+           file.path(
+             subfolders,
+             "selectionSpots.RDS"
+           )
+         )
+       ]
+
+       return(subfolders)
+     }
+   )
+)
+
+pdf(output_pdf,width = 7,height = 7)
+
+
+for (sub in sample_folders) {
+
+   sample_id <- paste(
+     basename(dirname(sub)),
+     basename(sub),
+     sep = "/"
+   )
+
+   selectionSpots <- readRDS(file.path(
+       sub,
+       "selectionSpots.RDS"
+     )
+   )
+
+   sample_results_dir <- file.path(
+     results_dir,
+     gsub(
+       "/",
+       "_",
+       sample_id
+     )
+   )
+
+   fractions_file <-  
+file.path(sample_results_dir,"annotFractionsBySpot.RDS") #This file contains the fraction (0-1) of each main cell type annotation per spot
+
+   if (!file.exists(fractions_file)) {
+
+     warning(
+       "No annotFractionsBySpot.RDS found for: ",
+       sample_id
+     )
+
+     next
+   }
+
+   fractions <- readRDS(fractions_file)
+   common_spots <- intersect(rownames(selectionSpots),fractions$spot)
+
+   if (length(common_spots) == 0) {
+
+     warning(
+       "No common spots in: ",
+       sample_id
+     )
+
+     next
+   }
+
+
+   plotData <- selectionSpots[
+     common_spots,
+     ,
+     drop = FALSE
+   ]
+
+
+   Tumor_fraction <- fractions$Tumor[ #Change name for cell fraction of interest
+     match(
+       common_spots,
+       fractions$spot
+     )
+   ]
+
+   plotData$Tumor_fraction <- Tumor_fraction #Change name for cell  fraction of interest
+
+# Genrate the plot
+   p <- ggplot(
+     plotData,
+     aes(
+       x = pixel_x,
+       y = pixel_y,
+       color = Tumor_fraction #Change name for cell fraction of interest
+     )
+   ) +
+
+     geom_point(
+       size = 2
+     ) +
+
+     scale_color_distiller(
+   palette = "RdYlBu",
+   direction = -1,
+   limits = c(0, 1),
+       name = "Tumor_fraction", #Change name for cell fraction of interest
+       na.value = "grey80"
+     ) +
+
+     coord_fixed() +
+     scale_y_reverse() +
+     theme(
+       legend.position = "right",
+       panel.grid = element_blank(),
+       panel.background = element_blank(),
+       axis.ticks = element_blank(),
+       axis.text = element_blank(),
+       axis.title = element_blank()
+     ) +
+
+     labs(title = paste("Tumor_fraction -",sample_id) #Change name for cell fraction of interest
+)
+
+   print(p)
+}
+
+dev.off()
+```
+
+Generate a .csv file with the *fraction of different annotation types (stroma, tumor...) per patient*. In each sample, pixels belonging to the same cell fraction were summed across all spots, and the overall fraction was subsequently calculated.
+```{r}
+base_path <- "/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG/byArray"
+results_dir <- "/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG/results"
+
+output_csv <- file.path(results_dir,"pixel_fractions_per_sample.csv")
+
+cn_folders <- list.dirs(base_path,full.names = TRUE,recursive = FALSE)
+
+sample_folders <- unlist(
+   lapply(
+     cn_folders,
+
+     function(cn) {
+
+       subfolders <- list.dirs(
+         cn,
+         full.names = TRUE,
+         recursive = FALSE
+       )
+
+       subfolders <- subfolders[
+         grepl(
+           "/[CDE][0-9]+$",
+           subfolders
+         )
+       ]
+
+       subfolders <- subfolders[
+         file.exists(
+           file.path(
+             subfolders,
+             "selectionSpots.RDS"
+           )
+         )
+       ]
+
+       return(subfolders)
+     }
+   )
+)
+
+
+all_results <- list()
+for (sub in sample_folders) {
+
+   sample_id <- paste(
+     basename(dirname(sub)),
+     basename(sub),
+     sep = "/"
+   )
+
+   sample_results_dir <- file.path(
+     results_dir,
+     gsub(
+       "/",
+       "_",
+       sample_id
+     )
+   )
+
+   grouped_file <- file.path(sample_results_dir,"annotBySpot_grouped.RDS")
+
+
+   if (!file.exists(grouped_file)) {
+
+     warning(
+       "No annotBySpot_grouped.RDS found for: ",
+       sample_id
+     )
+
+     next
+   }
+
+   annotBySpot_grouped <- readRDS(grouped_file)
+   annotBySpot_grouped <- as.data.frame(annotBySpot_grouped)
+
+   # Sum all pixels from all spots
+   pixel_totals <- colSums(annotBySpot_grouped,na.rm = TRUE)
+   total_pixels <- sum(pixel_totals, na.rm = TRUE)
+
+   if (total_pixels == 0) {
+
+     warning(
+       "Total pixels = 0 for: ",
+       sample_id
+     )
+
+     next
+   }
+
+# Get fractions
+   pixel_fractions <- pixel_totals / total_pixels
+
+   sample_result <- as.data.frame(t(pixel_fractions),check.names = FALSE)
+   sample_result <- cbind(Sample = sample_id,sample_result)
+   all_results[[sample_id]] <- sample_result
+}
+
+results_df <- bind_rows(all_results)
+write.csv(results_df, output_csv,row.names = FALSE)
+```
+
+Get and represent, for each slide, your *gene signature* with mean-zscore
+```{r}
+base_path <- "/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG/byArray"
+results_dir <- "/home/zdral/Documents/FernandoCalvo/ST_TNBC_WANG/results"
+
+signature_name <- "F-TBRS" #Change for gene signature name
+
+signature_genes <- c("ANGPTL4", "APBB2", "ARHGEF3", "ARHGEF40",  
+"AUTS2", "BHLHE40", "BPGM", "C13orf33", "C3orf52", "C4orf26",  
+"C5orf13", "CACHD1", "CALB2", "CALD1", "CDH6", "CDKN2B", "CHST11",  
+"CILP", "CLDN14", "CLDN4", "CNNM4", "CNTN1", "COL10A1", "COL27A1",  
+"CTGF", "DAAM1", "DACT1", "DDX10", "DHRS2", "DLX2", "DNAJB5",  
+"DNAJC18", "DOCK10", "E2F7", "EDN1", "EFNB2", "EGR2", "ELMOD1",  
+"EPHA4", "ESM1", "ETV6", "F2RL1", "FBXO32", "FGF1", "FGF18", "FLT1",  
+"FN1", "FNIP2", "FOXP1", "FRMD4A", "FUT4", "GADD45B", "GAS1", "GOPC",  
+"GPR161", "GPR183", "GRB14", "GZMK", "HAS2", "HBEGF", "HEY1", "HIC1",  
+"HIVEP2", "HS3ST3B1", "IFIH1", "IGFBP3", "IL11", "IL6", "INHBA",  
+"ITGB6", "JARID2", "JHDM1D", "JUNB", "KAL1", "KANK4", "KDM6B",  
+"KIAA1755", "KLF7", "LIF", "LMCD1", "LMO4", "LOC100128178",  
+"LOC201651", "LOC727930", "LOC728264", "LOC728449", "LOH3CR2A",  
+"LRRC8C", "MBOAT2", "MEGF9", "MEOX1", "MEX3B", "MGC16121", "MSC",  
+"MSX2", "MTSS1", "MURC", "NEDD9", "NET1", "NGF", "NKX3-1", "NOX4",  
+"NUAK1", "OSGIN2", "PALLD", "PCDH9", "PDGFC", "PDLIM4", "PDPN",  
+"PELI1", "PGBD5", "PGM2L1", "PIK3CD", "PKNOX2", "PLAUR", "PLCE1",  
+"PLEK2", "PMEPA1", "PODXL", "PPP1R14C", "PRDM1", "PRR5L", "PRR9",  
+"PTGS2", "PTHLH", "RASD1", "RASGRP3", "RASL12", "RHOU", "RYBP",  
+"S1PR5", "SDC1", "SEMA7A", "SERPINE1", "SETBP1", "SKIL", "SLC19A2",  
+"SLC35F2", "SLC35F3", "SLC46A3", "SMAD7", "SNAI1", "SNCAIP",  
+"SNORD114-3", "SNX30", "SORBS2", "SOX4", "SOX6", "SPSB1", "STEAP2",  
+"STK17B", "STK38L", "SYNE1", "TAGLN3", "TBX3", "TGFB2", "TIMP3",  
+"TMEM2", "TMEM49", "TNC", "TNFAIP6", "TRIB1", "TSHZ3", "TSPAN2",  
+"TUFT1", "VEGFA", "VEPH1", "WNT2", "WNT9A", "YIPF5", "ZNF365") #Add your gene list
+
+cn_folders <- list.dirs(
+   base_path,
+   full.names = TRUE,
+   recursive = FALSE
+)
+
+sample_folders <- unlist(
+
+   lapply(
+
+     cn_folders,
+
+     function(cn) {
+
+       subfolders <- list.dirs(
+         cn,
+         full.names = TRUE,
+         recursive = FALSE
+       )
+
+       subfolders <- subfolders[
+         grepl(
+           "/[CDE][0-9]+$",
+           subfolders
+         )
+
+       ]
+
+       subfolders <- subfolders[
+
+         file.exists(
+           file.path(
+             subfolders,
+             "annotBySpot_red.RDS"
+           )
+         )
+
+       ]
+
+       subfolders <- subfolders[
+
+         file.exists(
+           file.path(
+             subfolders,
+             "cnts_symbols.RData"
+           )
+         ) &
+
+           file.exists(
+             file.path(
+               subfolders,
+               "selectionSpots.RDS"
+             )
+           )
+
+       ]
+
+       return(subfolders)
+
+     }
+
+   )
+
+)
+
+# Identify the signature genes that are available in all samples.
+
+genes_per_sample <- list()
+
+for (sub in sample_folders) {
+
+   cnts_file <- file.path(
+     sub,
+     "cnts_symbols.RData"
+   )
+
+
+   if (exists("cnts_symbols")) {
+     rm(cnts_symbols)
+   }
+
+   load(cnts_file)
+
+   if (!exists("cnts_symbols")) {
+     next
+   }
+
+   common_genes <- intersect(
+     signature_genes,
+     colnames(cnts_symbols)
+   )
+
+   genes_per_sample[[sub]] <- common_genes
+
+}
+
+
+if (length(genes_per_sample) == 0) {
+
+   stop("Expression matrices could not be loaded."
+   )
+
+}
+
+# Select only genes present in ALL samples
+
+analysis_genes <- Reduce(intersect,genes_per_sample)
+
+if (length(analysis_genes) == 0) {
+
+   stop(
+     "None of the signature genes were detected across all samples"
+   )
+
+}
+
+# Calculate global gene expression to select control genes.
+global_gene_sum <- NULL
+global_gene_n <- NULL
+
+for (sub in sample_folders) {
+
+   cnts_file <- file.path(
+     sub,
+     "cnts_symbols.RData"
+   )
+
+   if (exists("cnts_symbols")) {
+     rm(cnts_symbols)
+   }
+
+   load(cnts_file)
+   
+   expr <- as.matrix(
+     cnts_symbols
+   )
+
+   total_counts <- rowSums(expr, na.rm = TRUE)
+
+   valid <- total_counts > 0
+
+   if (!any(valid)) {
+     next
+   }
+
+   expr <- expr[
+     valid,
+     ,
+     drop = FALSE
+   ]
+
+
+   total_counts <- total_counts[
+     valid
+   ]
+
+# Normalization CP10K + LOG1P
+   expr_log <- log1p(
+
+     sweep(
+       expr,
+       1,
+       total_counts,
+       "/"
+     ) * 10000
+
+   )
+
+   # Sum and number of observations per gene
+   gene_sum <- colSums(
+     expr_log,
+     na.rm = TRUE
+   )
+
+   gene_n <- colSums(
+     !is.na(expr_log)
+   )
+
+
+   if (is.null(global_gene_sum)) {
+
+     global_gene_sum <- gene_sum
+     global_gene_n <- gene_n
+
+   } else {
+
+     common_genes <- intersect(
+       names(global_gene_sum),
+       names(gene_sum)
+     )
+
+     global_gene_sum[
+       common_genes
+     ] <-
+
+       global_gene_sum[
+         common_genes
+       ] +
+
+       gene_sum[
+         common_genes
+       ]
+
+
+     global_gene_n[
+       common_genes
+     ] <-
+
+       global_gene_n[
+         common_genes
+       ] +
+
+       gene_n[
+         common_genes
+       ]
+
+   }
+
+}
+
+global_gene_mean <- global_gene_sum / global_gene_n
+
+# Select control genes
+
+control_candidates <- setdiff(names(global_gene_mean), analysis_genes)
+control_genes <- character(0)
+
+n_control_per_gene <- 5
+
+for (g in analysis_genes) {
+
+   if (!g %in% names(global_gene_mean)) {
+     next
+   }
+
+   target_mean <- global_gene_mean[g]
+   
+   candidates <- control_candidates[
+
+     !is.na(
+       global_gene_mean[
+         control_candidates
+       ]
+     )
+
+   ]
+
+   distances <- abs(
+
+     global_gene_mean[
+       candidates
+     ] -
+
+       target_mean
+
+   )
+
+   nearest <- names(
+
+     sort(
+       distances
+     )
+
+   )[
+
+     seq_len(
+
+       min(
+         n_control_per_gene,
+         length(distances)
+       )
+
+     )
+
+   ]
+
+   control_genes <- c(
+     control_genes,
+     nearest
+   )
+
+}
+
+control_genes <- unique(
+   control_genes
+)
+
+
+# Create a PDF file
+
+output_pdf <- file.path(results_dir,paste0(signature_name, "_spatial_module_zscore_all_samples.pdf"))
+
+pdf(output_pdf, width = 7, height = 7)
+
+# Process all samples
+
+for (sub in sample_folders) {
+
+   CN <- basename(
+     dirname(sub)
+   )
+   
+   array <- basename(
+     sub
+   )
+
+   sample_id <- paste(
+     CN,
+     array,
+     sep = "_"
+   )
+
+   cnts_file <- file.path(
+     sub,
+     "cnts_symbols.RData"
+   )
+
+
+   if (exists("cnts_symbols")) {
+     rm(cnts_symbols)
+   }
+
+
+   load(cnts_file)
+   expr <- as.matrix(cnts_symbols)
+   
+   spots_file <- file.path(sub,"selectionSpots.RDS")
+
+   selectionSpots <- readRDS(spots_file)
+
+   annot_file <- file.path(sub,"annotBySpot_red.RDS")
+
+   annotBySpot_red <- readRDS(annot_file)
+
+   
+# Match spots present in both the expression data and the spatial coordinates.
+
+   common_spots <- intersect(rownames(expr),rownames(selectionSpots))
+
+   if (length(common_spots) == 0) {
+
+     warning(
+       "No common spots in: ",
+       sample_id
+     )
+
+     next
+   }
+
+   expr <- expr[
+
+     common_spots,
+     ,
+     drop = FALSE
+
+   ]
+
+
+   selectionSpots <- selectionSpots[
+
+     common_spots,
+     ,
+     drop = FALSE
+
+   ]
+
+# Normalization CP10K + LOG1P
+
+   total_counts <- rowSums(
+     expr,
+     na.rm = TRUE
+   )
+
+   valid_spots <- total_counts > 0
+
+   if (!any(valid_spots)) {
+
+     warning(
+       "No valid spots in: ",
+       sample_id
+     )
+
+     next
+   }
+
+
+   expr <- expr[
+
+     valid_spots,
+     ,
+     drop = FALSE
+
+   ]
+
+
+   selectionSpots <- selectionSpots[
+
+     valid_spots,
+     ,
+     drop = FALSE
+
+   ]
+
+
+   total_counts <- total_counts[
+     valid_spots
+   ]
+
+   # CP10K + LOG1P
+
+   expr_log <- log1p(
+
+     sweep(
+       expr,
+       1,
+       total_counts,
+       "/"
+     ) * 10000
+
+   )
+
+   # Genes of the signature available
+
+   sample_signature_genes <- intersect(
+
+     analysis_genes,
+
+     colnames(expr_log)
+
+   )
+
+
+   sample_control_genes <- intersect(
+
+     control_genes,
+
+     colnames(expr_log)
+
+   )
+
+
+   if (length(sample_signature_genes) == 0) {
+
+     warning(
+       "No available genes in: ",
+       sample_id
+     )
+
+     next
+   }
+
+   # SIGNATURE SCORE
+   
+   signature_score <- rowMeans(
+
+     expr_log[
+       ,
+       sample_signature_genes,
+       drop = FALSE
+     ],
+
+     na.rm = TRUE
+
+   )
+
+   # CONTROL SCORE
+
+   if (length(sample_control_genes) > 0) {
+
+     control_score <- rowMeans(
+
+       expr_log[
+         ,
+         sample_control_genes,
+         drop = FALSE
+       ],
+
+       na.rm = TRUE
+
+     )
+
+
+   } else {
+
+
+     control_score <- rep(
+
+       0,
+
+       nrow(expr_log)
+
+     )
+
+   }
+
+   # MODULE SCORE
+
+   module_score <- signature_score - control_score
+
+   # MODULE Z-SCORE
+
+   module_sd <- sd(module_score,na.rm = TRUE)
+
+   if (
+
+     is.na(module_sd) ||
+     module_sd == 0
+
+   ) {
+
+     module_zscore <- rep(
+
+       NA_real_,
+
+       length(module_score)
+
+     )
+
+
+   } else {
+
+     module_zscore <- as.numeric(
+
+       scale(
+         module_score
+       )
+
+     )
+
+   }
+
+
+# Generate plots 
+   plotData <- as.data.frame(selectionSpots)
+   plotData$module_zscore <- module_zscore
+   
+   p <- ggplot(
+
+     plotData,
+
+     aes(
+
+       x = pixel_x,
+
+       y = pixel_y,
+
+       color = module_zscore
+
+     )
+
+   ) +
+
+
+     geom_point(
+
+       size = 2
+
+     ) +
+
+     scale_color_gradient2(
+
+       low = "#2166AC",
+
+       mid = "white",
+
+       high = "#B2182B",
+
+       midpoint = 0,
+
+       limits = c(
+         -4,
+         4
+       ),
+
+       oob = scales::squish,
+
+       breaks = c(
+         -4,
+         -2,
+         0,
+         2,
+         4
+       ),
+
+       name = "Module\nz-score",
+
+       na.value = "grey80"
+
+     ) +
+
+     coord_fixed() +
+     scale_y_reverse() +
+     theme_minimal(
+       base_size = 12
+     ) +
+
+     theme(legend.position = "right", panel.grid = element_blank(), panel.background = element_blank(), axis.ticks = element_blank(), axis.text = element_blank(), axis.title = element_blank(), plot.title = element_text(face = "bold")) +
+     labs(title = sample_id)
+
+   print(p)
+
+}
+
+dev.off()
+```
