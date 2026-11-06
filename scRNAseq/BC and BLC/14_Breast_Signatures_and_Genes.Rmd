@@ -1,0 +1,222 @@
+# ---
+title: "Breast Signatures"
+author: "Miguel Juliá"
+date: "2026-08-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Abstract
+
+For scRNAseq datasets (Breast and bladder), we want to investigate expression of genes and signatures in whole tumor clusters and in fibroblast clusters.
+
+We need:
+1. Image of whole tumor clusters with identification assigned
+2. Image of fibroblast clusters assigned
+3. Map of expression in both types of data (whole tumor and fibroblasts) for indicated genes and signatures
+4. Expression matrix (average) so we can generate a heatmap or graph (gene and signatures).
+5. For the BLCA dataset that we have normal and cancer tissue, expression matrix for gene and signtures of fibroblasts from normal and tumor
+
+
+## Load dataset together
+
+```{r load data, echo=F, warning=FALSE, message=FALSE}
+
+library(Seurat)
+library(ggplot2)
+library(SingleR) 
+library(dplyr)
+library(celldex) ## This is only available with R>=4.0, so load pregenerated data object hpca.ref instead if using R<4.0
+library(RColorBrewer)
+library(SingleCellExperiment)
+library(hdf5r)
+library(ggthemes)
+library(xlsx)
+
+setwd("/home/juliam/Documents/FernandoCalvo/scRNAseq_test/Signaures")
+
+load("Breast.srat.combined.RData")
+Breast.srat.combined <- srat.combined
+rm(srat.combined)
+load("Breast.srat.fibroblast.only.RData")
+# load("/home/juliam/Documents/FernandoCalvo/scRNAseq_test/Cords_2023/BodenmillerGroup/CAFclassification-v0.1.1/BodenmillerGroup-CAFclassification-09b0205/scRNA-seq/Breast.srat.fibroblast.only.RData")
+all.fibroblast <- FindNeighbors(object = all.fibroblast, dims = 1:25) %>% FindClusters(resolution = seq(from = 0.1, to = 2, by = 0.1))
+all.fibroblast <- FindClusters(object = all.fibroblast, resolution = seq(from = 0.1, to = 1, by = 0.1))
+
+all.fibroblast <- FindNeighbors(object = all.fibroblast, dims = 1:25, graph.name = "SCT_snn") %>% FindClusters(resolution = seq(from = 0.1, to = 2, by = 0.1), graph.name = "SCT_snn")
+all.fibroblast <- FindClusters(object = all.fibroblast, resolution = seq(from = 0.1, to = 1, by = 0.1), graph.name = "SCT_snn")
+Idents(all.fibroblast) <- all.fibroblast$SCT_snn_res.0.4
+#add structural CAFs (sCAFs)/ activated CAFs (aCAFs) to labels
+x <- c(0:11)
+y <-c("mCAF", "iCAF", "vCAF", "Pericyte", "tpCAF", "hsp_tpCAF", "IDO_CAF", "mCAF", "apCAF",  "rCAF", "apCAF", "dCAF")
+meta2_cluster <- as.data.frame(cbind(x,y))
+colnames(meta2_cluster) <-c("Cluster","CAF_type_harmony")
+meta2 <- meta2_cluster$CAF_type_harmony
+meta2 <-as.character(meta2)
+names(x = meta2) <- levels(x = all.fibroblast)
+all.fibroblast <- RenameIdents(object = all.fibroblast, meta2)
+#Save celltype information in metadata
+all.fibroblast[["CAFtype"]] <- Idents(object = all.fibroblast)
+# p<-DimPlot(object = all.fibroblast, reduction = 'umap',group.by = "CAFtype", label = F, pt.size = 1)+scale_color_tableau()
+# plot(p)
+Breast.srat.fibroblasts.only <- all.fibroblast
+rm(all.fibroblast)
+
+```
+
+
+## 1. Image of whole tumor clusters with identification assigned
+
+
+Breast
+
+```{r whole clusters Breast}
+
+Breast.srat.combined <- SetIdent(Breast.srat.combined, value = "seurat_clusters")
+DimPlot(Breast.srat.combined, reduction = "umap", label = F, repel = TRUE)
+
+Breast.srat.combined$cell_type[is.na(Breast.srat.combined$cell_type)] <- "NA"
+
+Breast.srat.combined <- SetIdent(Breast.srat.combined, value = "cell_type")
+DimPlot(Breast.srat.combined, label = F , repel = T, label.size = 3) + ggtitle('Tissue types metadata')
+
+Breast.srat.combined <- SetIdent(Breast.srat.combined, value = "cell_type")
+list_fibroblasts <- WhichCells(Breast.srat.combined, idents = c( "fibroblast"))
+DimPlot(Breast.srat.combined, label=F, cells.highlight= list(list_fibroblasts), cols.highlight = c("darkblue"), cols= "grey")
+
+```
+
+
+## 2. Image of fibroblast clusters assigned
+
+Breast
+
+```{r fibroblasts clusters Breast}
+
+Breast.srat.fibroblasts.only <- SetIdent(Breast.srat.fibroblasts.only, value = "seurat_clusters")
+DimPlot(Breast.srat.fibroblasts.only, reduction = "umap", label = F, repel = TRUE)
+DimPlot(Breast.srat.fibroblasts.only, reduction = "umap", label = F, repel = TRUE, group.by = "CAFtype")+scale_color_tableau()
+
+Breast.srat.fibroblasts.only$CAFtype_tpCAFjoined <- Breast.srat.fibroblasts.only$CAFtype
+Breast.srat.fibroblasts.only$CAFtype_tpCAFjoined[Breast.srat.fibroblasts.only$CAFtype_tpCAFjoined == "hsp_tpCAF"] <- "tpCAF"
+DimPlot(Breast.srat.fibroblasts.only, reduction = "umap", label = F, repel = TRUE, group.by = "CAFtype_tpCAFjoined")+scale_color_tableau()
+
+```
+
+
+## 3. Map of expression in both types of data (whole tumor and fibroblasts) for indicated genes and signatures
+
+Get signatures and genes
+
+```{r}
+
+my_signatures <- as.data.frame(read.xlsx("14_selecting signatures.xlsx", 1, header = F))
+
+my_genes <- read.xlsx("14_selecting signatures.xlsx", 2, header = F)
+my_genes <- c(unlist(my_genes))
+
+```
+
+Signatures expression in breast
+
+```{r gene expression Breast}
+
+
+DefaultAssay(Breast.srat.combined) <- "SCT"
+
+Breast.table <- data.frame(
+  cluster = Breast.srat.combined$seurat_clusters,
+  cell_type = Breast.srat.combined$cell_type,
+  tumour = "Tumour"
+)
+
+for (signature in 1:nrow(my_signatures)){
+  signature_name <- my_signatures$X1[signature]
+  signature_genes <- my_signatures[signature,-c(1,2)]
+  marker_gene_list <- signature_genes[!is.na(signature_genes)]
+  
+  marker_gene_list <- list(unlist(marker_gene_list))
+  
+  Breast.srat.combined <- AddModuleScore(Breast.srat.combined, features = marker_gene_list, name = signature_name)
+  print(FeaturePlot(Breast.srat.combined, features = paste0(signature_name,"1")))
+  
+  Breast.table[signature_name] <- Breast.srat.combined[[paste0(signature_name,"1")]]
+  
+}
+
+for (gene_set in my_genes) {
+  print(FeaturePlot(Breast.srat.combined, features = gene_set))
+}
+
+for (gene in my_genes){
+  Breast.table[gene] <- FetchData(Breast.srat.combined, vars = gene)
+}
+
+```
+
+Signature expression in breast fibroblasts
+
+```{r gene expression Breast fibroblasts}
+
+DefaultAssay(Breast.srat.fibroblasts.only) <- "SCT"
+
+Breast.fibroblasts.table <- data.frame(
+  cluster = Breast.srat.fibroblasts.only$seurat_clusters,
+  cell_type = Breast.srat.fibroblasts.only$CAFtype,
+  cell_type_tpCAFjoined = Breast.srat.fibroblasts.only$CAFtype_tpCAFjoined,
+  tumour = "Tumour"
+)
+
+for (signature in 1:nrow(my_signatures)){
+  signature_name <- my_signatures$X1[signature]
+  signature_genes <- my_signatures[signature,-c(1,2)]
+  marker_gene_list <- signature_genes[!is.na(signature_genes)]
+  
+  marker_gene_list <- list(unlist(marker_gene_list))
+  
+  Breast.srat.fibroblasts.only <- AddModuleScore(Breast.srat.fibroblasts.only, features = marker_gene_list, name = signature_name)
+  print(FeaturePlot(Breast.srat.fibroblasts.only, features = paste0(signature_name,"1")))
+  
+  Breast.fibroblasts.table[signature_name] <- Breast.srat.fibroblasts.only[[paste0(signature_name,"1")]]
+  
+}
+
+for (gene_set in my_genes) {
+  print(FeaturePlot(Breast.srat.combined, features = gene_set))
+}
+
+for (gene in my_genes){
+  Breast.fibroblasts.table[gene] <- FetchData(Breast.srat.fibroblasts.only, vars = gene)
+}
+
+```
+
+
+## 4. Expression matrix (average) so we can generate a heatmap or graph (gene and signatures)
+
+I created the tables containing for every cell: normalised expression values per gene, signature value, cluster assigned, and celltype assigned.
+
+Breast
+
+```{r heatmap Breast}
+
+write.csv(Breast.table, file="14_Breast.table.selecting_signatures.csv")
+
+```
+
+Breast fibroblasts
+
+```{r heatmap Breast fibroblasts}
+
+write.csv(Breast.fibroblasts.table, file="14_Breast.fibroblasts.table.selecting_signatures.csv")
+
+```
+
+
+## 5. For the BLCA dataset that we have normal and cancer tissue, expression matrix for gene and signtures of fibroblasts from normal and tumor
+
+Added as extra field in previous tables.
